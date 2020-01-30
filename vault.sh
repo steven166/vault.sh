@@ -6,6 +6,7 @@ declare -A secrets=( )
 declare vaultFile="${VAULT_SH_VAULT-}"
 declare keyFile="${VAULT_SH_KEYFILE-}"
 declare VAULT_VERSION=1
+declare CURRENT_VAULT_VERSION=3
 declare VAULT_ENCRYPT=true
 
 # Load vault from file
@@ -22,37 +23,71 @@ function loadVault() {
     if [ -f $keyFile ]; then
       line_number=0
 
-      decryptPipe="openssl enc -aes-256-cbc -md md5 -d -pass file:$keyFile"
+      vault_version="1"
+      vault_version_info=$(head -n 1 $vaultFile)
+      if [[ $vault_version_info == "#vault.sh:"* ]]; then
+        vault_version=$(echo $vault_version_info | cut -d: -f2)
+      fi
+
+      decryptPipe="decrypt $keyFile"
       if [ "$VAULT_ENCRYPT" == "false" ]; then
         decryptPipe="cat"
       fi
 
-      while IFS=':' read -r key value; do
-        if [ "$key" == "#vault.sh" ] && [ "$line_number" -eq "0" ]; then
-          VAULT_VERSION=$value
-        else
-          if [[ ! -z "$key" ]]; then
-            if [ ${secrets[$key]+abc} ]; then
-              unset secrets["$key"]
+      if [ "$vault_version" == "1" ]; then
+        # Lagacy
+        while IFS=':' read -r key value; do
+          if [ "$key" == "#vault.sh" ] && [ "$line_number" -eq "0" ]; then
+            vault_version=$value
+          else
+            if [[ ! -z "$key" ]]; then
+              if [ ${secrets[$key]+abc} ]; then
+                unset secrets["$key"]
+              fi
+              if [[ ! -z "$value" ]]; then
+                case "$vault_version" in
+                    1)
+                        key_part=$(echo $key | cut -d '=' -f 1)
+                        value_part=$(echo $key | cut -d '=' -f 2-)
+                        secrets[$key_part]=$(printf $value_part | b64dec | encrypt $keyFile | b64enc)
+                        ;;
+                    2)
+                        secrets[$key]=$(printf $value | b64dec | encrypt $keyFile | b64enc)
+                        ;;
+                    *)
+                        echo "Unknown vault version: $vault_version"
+                        exit 1
+                        ;;
+                esac
+              fi
             fi
-            case "$VAULT_VERSION" in
-                1)
-                    key_part=$(echo $key | cut -d '=' -f 1)
-                    value_part=$(echo $key | cut -d '=' -f 2-)
-                    secrets[$key_part]=$value_part 
-                    ;;
-                2)
-                    secrets[$key]=$value
-                    ;;
-                *)
-                    echo "Unknown vault version: $VAULT_VERSION"
-                    exit 1
-                    ;;
-            esac
           fi
-        fi
-        line_number=$(($line_number + 1))
-      done <<< $(cat $vaultFile | $decryptPipe)
+          line_number=$(($line_number + 1))
+        done <<< $(cat $vaultFile | openssl enc -aes-256-cbc -md md5 -d -pass file:$keyFile)
+      else
+        while IFS=":" read -r key value; do
+            if [[ ! -z "$key" ]]; then
+              if [[ "$key" != "#"* ]]; then
+                if [ ${secrets[$key]+abc} ]; then
+                  unset secrets["$key"]
+                fi
+                case "$vault_version" in
+                    3)
+                        if [ "$VAULT_ENCRYPT" == "false" ]; then
+                          secrets[$key]=$(printf $value | b64dec | encrypt $keyFile | b64enc)
+                        else
+                          secrets[$key]=$value
+                        fi
+                        ;;
+                    *)
+                        echo "Unknown vault version: $vault_version"
+                        exit 1
+                        ;;
+                esac
+              fi
+            fi
+        done <<< $(cat $vaultFile)
+      fi
     else
       >&2 echo "keyfile $keyFile not found"
       exit 1
@@ -74,26 +109,18 @@ function saveVault() {
       exit 1
   fi
 
-  encryptPipe="openssl enc -aes-256-cbc -md md5 -pass file:$keyFile"
-  if [ "$VAULT_ENCRYPT" == "false" ]; then
-    encryptPipe="cat"
-  fi
-
   if [ -f $keyFile ]; then
     local output=""
-    output="#vault.sh:2\n"
+    output="#vault.sh:${CURRENT_VAULT_VERSION}\n"
     for key in "${!secrets[@]}"
     do
-      case "$VAULT_VERSION" in
-          1)
-              output="${output}$key:$(b64enc ${secrets[$key]})\n"
-              ;;
-          2)
-              output="${output}$key:${secrets[$key]}\n"
-              ;;
-      esac
+      if [ "$VAULT_ENCRYPT" == "false" ]; then
+        output="${output}$key:$(printf ${secrets[$key]} | b64dec | decrypt $keyFile | b64enc)\n"
+      else
+        output="${output}$key:${secrets[$key]}\n"
+      fi
     done
-    printf "%b" "$output" | sort | $encryptPipe > $vaultFile
+    printf "%b" "$output" | sort > $vaultFile
   else
     >&2 echo "keyfile $keyFile not found"
     exit 1
@@ -104,11 +131,16 @@ function setSecret() {
   local key=${1-}
   local secret="${2-}"
 
+  if [[ -z "$keyFile" ]]; then
+      >&2 echo "missing variable: VAULT_SH_KEYFILE"
+      exit 1
+  fi
+
   echo "Stored ${key} in $VAULT_SH_VAULT"
   if [ ${secrets[$key]+abc} ]; then
     unset secrets["$key"]
   fi
-  secrets[$key]="$secret"
+  secrets[$key]="$(echo $secret | b64dec | encrypt $keyFile | b64enc)"
 }
 
 function removeSecret() {
@@ -123,6 +155,11 @@ function removeSecret() {
 
 function getSecret() {
   local key=${1-}
+
+  if [[ -z "$keyFile" ]]; then
+      >&2 echo "missing variable: VAULT_SH_KEYFILE"
+      exit 1
+  fi
 
   if [[ -z "$key" ]]; then
       >&2 echo "Usage: get <key>"
@@ -139,7 +176,7 @@ function getSecret() {
       >&2 echo "$key not found in vault"
       exit 1
   fi
-  printf "%s" "$(b64dec $value)"
+  printf "%s" "$(echo $value | b64dec | decrypt $keyFile)"
 }
 
 function showHelp() {
@@ -208,11 +245,23 @@ function import {
 }
 
 function b64enc {
-  echo $1 | base64
+  read input
+  printf $input | base64
 }
 
 function b64dec {
-  (echo $1 | base64 -D 2> /dev/null) || (echo $1 | base64 -d)
+  read input
+  (printf $input | base64 -D 2> /dev/null) || (echo $input | base64 -d)
+}
+
+function decrypt {
+  read input
+  printf $input | openssl enc -aes-256-cbc -md md5 -d -pass file:${1:-}
+}
+
+function encrypt {
+  read input
+  printf $input | openssl enc -aes-256-cbc -md md5 -pass file:${1:-}
 }
 
 case "${1-help}" in
@@ -233,7 +282,7 @@ case "${1-help}" in
       secret=''
       if [ -p /dev/stdin ]; then
         secret=$(cat | openssl base64 -A)
-      else 
+      else
         read -s -p "Secret: " input
         echo
         if [[ -z "$input" ]]; then
@@ -242,7 +291,7 @@ case "${1-help}" in
         fi
         secret=$(echo $input | openssl base64 -A)
       fi
-      
+
       loadVault
       setSecret ${2-} "${secret-}"
       saveVault
