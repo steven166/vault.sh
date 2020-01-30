@@ -140,7 +140,7 @@ function setSecret() {
   if [ ${secrets[$key]+abc} ]; then
     unset secrets["$key"]
   fi
-  secrets[$key]="$(echo $secret | b64dec | encrypt $keyFile | b64enc)"
+  secrets[$key]="$(printf $secret | b64dec | encrypt $keyFile | b64enc)"
 }
 
 function removeSecret() {
@@ -176,7 +176,7 @@ function getSecret() {
       >&2 echo "$key not found in vault"
       exit 1
   fi
-  printf "%s" "$(echo $value | b64dec | decrypt $keyFile)"
+  printf "%s" "$(printf $value | b64dec | decrypt $keyFile)"
 }
 
 function showHelp() {
@@ -251,7 +251,7 @@ function b64enc {
 
 function b64dec {
   read input
-  (printf $input | base64 -D 2> /dev/null) || (echo $input | base64 -d)
+  (printf $input | base64 -D 2> /dev/null) || (printf $input | base64 -d)
 }
 
 function decrypt {
@@ -289,7 +289,7 @@ case "${1-help}" in
           >&2 echo "Cannot store empty secret"
           exit 1
         fi
-        secret=$(echo $input | openssl base64 -A)
+        secret=$(printf $input | openssl base64 -A)
       fi
 
       loadVault
@@ -320,12 +320,3 @@ case "${1-help}" in
       exit 1
       ;;
 esac
-
-
-# saveVault "vault" "key"
-# loadVault "vault" "key"
-# insertSecret "my-password" "blabla"
-# insertSecret "my-password2" "bla2bla"
-# saveVault "vault" "key"
-# echo ${secrets["my-password"]}
-# echo ${secrets["my-password2"]}
