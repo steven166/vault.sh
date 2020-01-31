@@ -245,23 +245,19 @@ function import {
 }
 
 function b64enc {
-  read input
-  printf $input | base64
+  openssl base64 -A  < /dev/stdin
 }
 
 function b64dec {
-  read input
-  (printf $input | base64 -D 2> /dev/null) || (printf $input | base64 -d)
+  openssl base64 -A -d < /dev/stdin
 }
 
 function decrypt {
-  read input
-  printf $input | openssl enc -aes-256-cbc -md md5 -d -pass file:${1:-}
+  openssl enc -aes-256-cbc -md md5 -d -pass file:${1:-} < /dev/stdin
 }
 
 function encrypt {
-  read input
-  printf $input | openssl enc -aes-256-cbc -md md5 -pass file:${1:-}
+  openssl enc -aes-256-cbc -md md5 -pass file:${1:-} < /dev/stdin
 }
 
 case "${1-help}" in
